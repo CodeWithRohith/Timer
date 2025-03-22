@@ -88,7 +88,14 @@ def login():
         if stored_password == data["password"]:
             # Create a response and set the user_id cookie
             response = make_response(generate_response("success", "Login successful", {"user_id": user_id}))
-            response.set_cookie('user_id', str(user_id), max_age=timedelta(days=1))  # Cookie expires in 1 day
+            response.set_cookie(
+                'user_id', 
+                str(user_id), 
+                max_age=timedelta(days=1),  # Cookie expires in 1 day
+                secure=True,  # Send cookie only over HTTPS
+                httponly=True,  # Prevent client-side JavaScript from accessing the cookie
+                samesite='None'  # Allow cross-site cookies
+            )
             return response
     return generate_response("error", "Invalid email or password"), 401
 
