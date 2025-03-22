@@ -3,12 +3,14 @@ from datetime import datetime, timedelta
 import redis
 from dotenv import load_dotenv
 import os
+from flask_cors import CORS
 
 # Load environment variables
 load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app, supports_credentials=True)
 
 # Redis Cloud connection details
 REDIS_HOST = "redis-11218.crce174.ca-central-1-1.ec2.redns.redis-cloud.com"
