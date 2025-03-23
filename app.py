@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import redis
 from dotenv import load_dotenv
@@ -71,59 +71,20 @@ def register_user():
 
     return generate_response("success", "User registered successfully", {"user_id": user_id}), 201
 
-@app.route('/users/login', methods=['POST'])
-def login():
-    """Login a user."""
-    data = request.json
-    required_fields = ["email", "password"]
-
-    if not all(field in data for field in required_fields):
-        return generate_response("error", "Missing required fields (email, password)"), 400
-
-    # Check if the user exists in Redis
-    user_id = redis_client.hget("users", data["email"])
-    if user_id:
-        # Verify password (in a real app, use hashed passwords)
-        stored_password = redis_client.hget(f"user:{user_id}", "password")
-        if stored_password == data["password"]:
-            # Create a response and set the user_id cookie
-            response = make_response(generate_response("success", "Login successful", {"user_id": user_id}))
-            response.set_cookie(
-                'user_id', 
-                str(user_id), 
-                max_age=timedelta(days=1),  # Cookie expires in 1 day
-                secure=True,  # Send cookie only over HTTPS
-                httponly=True,  # Prevent client-side JavaScript from accessing the cookie
-                samesite='None'  # Allow cross-site cookies
-            )
-            return response
-    return generate_response("error", "Invalid email or password"), 401
-
-@app.route('/users/logout', methods=['POST'])
-def logout():
-    """Logout a user."""
-    # Create a response and clear the user_id cookie
-    response = make_response(generate_response("success", "Logout successful"))
-    response.set_cookie('user_id', '', expires=0)  # Clear the cookie
-    return response
-
 # -----------------------------------
 # ⏱️ TIMER/PAY APIs
 # -----------------------------------
 
 @app.route('/timer/pay/start', methods=['POST'])
 def start_pay_timer():
-    """Start a new pay timer session."""
-    # Get user_id from the cookie
-    user_id = request.cookies.get('user_id')
-    if not user_id:
-        return generate_response("error", "Unauthorized: Please log in"), 401
-
+    """Start a new pay timer session. Auto-generates a session_id."""
     data = request.json
-    required_fields = ["hourly_pay", "deductions", "expected_pay"]
+    required_fields = ["user_id", "hourly_pay", "deductions", "expected_pay"]
 
     if not all(field in data for field in required_fields):
-        return generate_response("error", "Missing required fields (hourly_pay, deductions, expected_pay)"), 400
+        return generate_response("error", "Missing required fields (user_id, hourly_pay, deductions, expected_pay)"), 400
+
+    user_id = data["user_id"]
 
     # Ensure all fields have valid values
     session_data = {
@@ -146,17 +107,13 @@ def start_pay_timer():
 @app.route('/timer/pay/stop', methods=['POST'])
 def stop_pay_timer():
     """Stop an existing pay timer session."""
-    # Get user_id from the cookie
-    user_id = request.cookies.get('user_id')
-    if not user_id:
-        return generate_response("error", "Unauthorized: Please log in"), 401
-
     data = request.json
-    required_fields = ["session_id"]
+    required_fields = ["user_id", "session_id"]
 
     if not all(field in data for field in required_fields):
-        return generate_response("error", "Missing required field (session_id)"), 400
+        return generate_response("error", "Missing required fields (user_id, session_id)"), 400
 
+    user_id = data["user_id"]
     session_id = data["session_id"]
     session_key = f"session:pay:{session_id}"
 
@@ -166,6 +123,9 @@ def stop_pay_timer():
 
     # Get session data
     session_data = redis_client.hgetall(session_key)
+    if session_data["user_id"] != user_id:
+        return generate_response("error", "Unauthorized: Session does not belong to the user"), 403
+
     start_time = datetime.fromisoformat(session_data["start_time"])
     end_time = datetime.utcnow()
 
@@ -186,10 +146,9 @@ def stop_pay_timer():
 @app.route('/timer/pay/history', methods=['GET'])
 def get_pay_timer_history():
     """Get all pay timer sessions for a user."""
-    # Get user_id from the cookie
-    user_id = request.cookies.get('user_id')
+    user_id = request.args.get("user_id")
     if not user_id:
-        return generate_response("error", "Unauthorized: Please log in"), 401
+        return generate_response("error", "Missing required field (user_id)"), 400
 
     # Find all pay sessions for the user
     session_keys = redis_client.keys("session:pay:*")
