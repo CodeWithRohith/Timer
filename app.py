@@ -101,6 +101,39 @@ def get_history():
     history.sort(key=lambda x: x["end_time"], reverse=True)
     return _corsify_actual_response(jsonify(history))
 
+@app.route('/timer/status/<session_id>', methods=['GET', 'OPTIONS'])
+def get_timer_status(session_id):
+    """Get the status of a timer session."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    
+    session_key = f"session:{session_id}"
+    if not redis_client.exists(session_key):
+        return jsonify({"error": "Session not found"}), 404
+        
+    session_data = redis_client.hgetall(session_key)
+    is_active = session_data.get("active", "false") == "true"
+    
+    response_data = {
+        "active": is_active,
+        "session_id": session_id,
+        "hourly_pay": float(session_data.get("hourly_pay", 0)),
+        "start_time": session_data.get("start_time")
+    }
+    
+    if is_active:
+        start_time = datetime.fromisoformat(session_data["start_time"])
+        elapsed_seconds = (datetime.utcnow() - start_time).total_seconds()
+        response_data["elapsed_seconds"] = elapsed_seconds
+        response_data["current_earnings"] = elapsed_seconds * float(session_data["hourly_pay"]) / 3600
+    else:
+        if "end_time" in session_data:
+            response_data["end_time"] = session_data["end_time"]
+        if "total_pay" in session_data:
+            response_data["total_pay"] = float(session_data["total_pay"])
+    
+    return _corsify_actual_response(jsonify(response_data))
+
 @app.route('/admin/clear_sessions', methods=['POST'])
 def clear_sessions():
     """Admin endpoint to clear all sessions (for testing only)"""
