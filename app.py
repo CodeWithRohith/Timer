@@ -32,6 +32,20 @@ def start_timer():
     except ValueError:
         return jsonify({"error": "hourly_pay must be a number"}), 400
 
+    # Check for an existing active session
+    active_sessions = redis_client.smembers("active_sessions")
+    if active_sessions:
+        session_id = list(active_sessions)[0]  # Assuming only one active session at a time
+        session_data = redis_client.hgetall(f"session:{session_id}")
+
+        return _corsify_actual_response(jsonify({
+            "status": "resumed",
+            "session_id": session_id,
+            "hourly_pay": float(session_data["hourly_pay"]),
+            "start_time": session_data["start_time"]
+        }))
+
+    # If no active session, create a new one
     session_id = redis_client.incr("session_counter")
     session_data = {
         "start_time": datetime.utcnow().isoformat(),
@@ -45,37 +59,50 @@ def start_timer():
     redis_client.sadd("active_sessions", session_id)
     
     return _corsify_actual_response(jsonify({
-        "status": "success",
+        "status": "started",
         "session_id": session_id,
         "hourly_pay": hourly_pay
     }))
 
-@app.route('/timer/stop/<session_id>', methods=['POST', 'OPTIONS'])
-def stop_timer(session_id):
-    """Stop an active timer session."""
+@app.route('/timer/stop', methods=['POST', 'OPTIONS'])
+def stop_timer():
+    """Stop the active timer session and calculate total pay."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    
+
+    active_sessions = redis_client.smembers("active_sessions")
+    if not active_sessions:
+        return jsonify({"error": "No active timer session"}), 400
+
+    session_id = list(active_sessions)[0]  # Get the active session
     session_key = f"session:{session_id}"
-    if not redis_client.exists(session_key):
-        return jsonify({"error": "Session not found"}), 404
-        
     session_data = redis_client.hgetall(session_key)
+
+    if not session_data or session_data.get("active") != "true":
+        return jsonify({"error": "Invalid or already stopped session"}), 400
+
+    # Calculate total pay
     start_time = datetime.fromisoformat(session_data["start_time"])
     end_time = datetime.utcnow()
-    elapsed_seconds = (end_time - start_time).total_seconds()
-    total_pay = elapsed_seconds * float(session_data["hourly_pay"]) / 3600
+    elapsed_hours = (end_time - start_time).total_seconds() / 3600
+    total_pay = round(float(session_data["hourly_pay"]) * elapsed_hours, 2)
 
-    redis_client.hset(session_key, "end_time", end_time.isoformat())
-    redis_client.hset(session_key, "total_pay", total_pay)
-    redis_client.hset(session_key, "active", "false")
-    redis_client.srem("active_sessions", session_id)
+    # Update session data
+    redis_client.hset(session_key, mapping={
+        "active": "false",
+        "end_time": end_time.isoformat(),
+        "total_pay": str(total_pay)
+    })
     
+    # Remove from active_sessions
+    redis_client.srem("active_sessions", session_id)
+
     return _corsify_actual_response(jsonify({
-        "status": "success",
+        "status": "stopped",
         "session_id": session_id,
-        "total_pay": round(total_pay, 2),
-        "elapsed_seconds": elapsed_seconds
+        "start_time": session_data["start_time"],
+        "end_time": end_time.isoformat(),
+        "total_pay": total_pay
     }))
 
 @app.route('/timer/history', methods=['GET', 'OPTIONS'])
