@@ -35,17 +35,17 @@ def start_timer():
     # Check for an existing active session
     active_sessions = redis_client.smembers("active_sessions")
     if active_sessions:
-        session_id = list(active_sessions)[0]  # Assuming only one active session at a time
+        session_id = list(active_sessions)[0]
         session_data = redis_client.hgetall(f"session:{session_id}")
 
         return _corsify_actual_response(jsonify({
-            "status": "resumed",
+            "status": "already_running",
             "session_id": session_id,
             "hourly_pay": float(session_data["hourly_pay"]),
             "start_time": session_data["start_time"]
         }))
 
-    # If no active session, create a new one
+    # Create new session
     session_id = redis_client.incr("session_counter")
     session_data = {
         "start_time": datetime.utcnow().isoformat(),
@@ -66,7 +66,7 @@ def start_timer():
 
 @app.route('/timer/stop', methods=['POST', 'OPTIONS'])
 def stop_timer():
-    """Stop the active timer session and calculate total pay."""
+    """Stop the active timer session."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
 
@@ -74,7 +74,7 @@ def stop_timer():
     if not active_sessions:
         return jsonify({"error": "No active timer session"}), 400
 
-    session_id = list(active_sessions)[0]  # Get the active session
+    session_id = list(active_sessions)[0]
     session_key = f"session:{session_id}"
     session_data = redis_client.hgetall(session_key)
 
@@ -87,14 +87,12 @@ def stop_timer():
     elapsed_hours = (end_time - start_time).total_seconds() / 3600
     total_pay = round(float(session_data["hourly_pay"]) * elapsed_hours, 2)
 
-    # Update session data
+    # Update session
     redis_client.hset(session_key, mapping={
         "active": "false",
         "end_time": end_time.isoformat(),
         "total_pay": str(total_pay)
     })
-    
-    # Remove from active_sessions
     redis_client.srem("active_sessions", session_id)
 
     return _corsify_actual_response(jsonify({
@@ -102,7 +100,37 @@ def stop_timer():
         "session_id": session_id,
         "start_time": session_data["start_time"],
         "end_time": end_time.isoformat(),
-        "total_pay": total_pay
+        "total_pay": total_pay,
+        "hours_worked": round(elapsed_hours, 4)
+    }))
+
+@app.route('/timer/active_status', methods=['GET', 'OPTIONS'])
+def get_active_timer_status():
+    """Check if there's an active timer session."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    
+    active_sessions = redis_client.smembers("active_sessions")
+    if not active_sessions:
+        return _corsify_actual_response(jsonify({"active": False}))
+    
+    session_id = list(active_sessions)[0]
+    session_key = f"session:{session_id}"
+    session_data = redis_client.hgetall(session_key)
+    
+    if session_data.get("active", "false") != "true":
+        return _corsify_actual_response(jsonify({"active": False}))
+    
+    start_time = datetime.fromisoformat(session_data["start_time"])
+    elapsed_seconds = (datetime.utcnow() - start_time).total_seconds()
+    
+    return _corsify_actual_response(jsonify({
+        "active": True,
+        "session_id": session_id,
+        "hourly_pay": float(session_data["hourly_pay"]),
+        "start_time": session_data["start_time"],
+        "elapsed_seconds": elapsed_seconds,
+        "current_earnings": elapsed_seconds * float(session_data["hourly_pay"]) / 3600
     }))
 
 @app.route('/timer/history', methods=['GET', 'OPTIONS'])
@@ -127,71 +155,6 @@ def get_history():
     
     history.sort(key=lambda x: x["end_time"], reverse=True)
     return _corsify_actual_response(jsonify(history))
-
-@app.route('/timer/status/<session_id>', methods=['GET', 'OPTIONS'])
-def get_timer_status(session_id):
-    """Get the status of a timer session."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    
-    session_key = f"session:{session_id}"
-    if not redis_client.exists(session_key):
-        return jsonify({"error": "Session not found"}), 404
-        
-    session_data = redis_client.hgetall(session_key)
-    is_active = session_data.get("active", "false") == "true"
-    
-    response_data = {
-        "active": is_active,
-        "session_id": session_id,
-        "hourly_pay": float(session_data.get("hourly_pay", 0)),
-        "start_time": session_data.get("start_time")
-    }
-    
-    if is_active:
-        start_time = datetime.fromisoformat(session_data["start_time"])
-        elapsed_seconds = (datetime.utcnow() - start_time).total_seconds()
-        response_data["elapsed_seconds"] = elapsed_seconds
-        response_data["current_earnings"] = elapsed_seconds * float(session_data["hourly_pay"]) / 3600
-    else:
-        if "end_time" in session_data:
-            response_data["end_time"] = session_data["end_time"]
-        if "total_pay" in session_data:
-            response_data["total_pay"] = float(session_data["total_pay"])
-    
-    return _corsify_actual_response(jsonify(response_data))
-
-@app.route('/admin/clear_sessions', methods=['POST'])
-def clear_sessions():
-    """Admin endpoint to clear all sessions (for testing only)"""
-    # Add basic security (optional but recommended)
-    auth = request.headers.get('Password')
-    if auth != 'rohith':
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        # Get all session keys
-        session_keys = redis_client.keys("session:*")
-        active_sessions = redis_client.smembers("active_sessions")
-        
-        # Delete all sessions
-        for key in session_keys:
-            redis_client.delete(key)
-        
-        # Clear active sessions set
-        redis_client.delete("active_sessions")
-        
-        # Reset counters (optional)
-        redis_client.set("session_counter", 0)
-        
-        return jsonify({
-            "status": "success",
-            "deleted_sessions": len(session_keys),
-            "active_sessions_cleared": len(active_sessions)
-        }), 200
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 def _build_cors_preflight_response():
     response = jsonify({"status": "preflight"})
